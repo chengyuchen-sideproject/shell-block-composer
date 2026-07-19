@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shell Script 功能積木組合器</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --line:#e3e6ea; --pri:#0f766e; --warn:#dc2626; }
+  * { box-sizing:border-box; }
+  body { font-family:"Segoe UI","Microsoft JhengHei",sans-serif; margin:0; background:var(--bg); color:#1a1d21; }
+  header { background:#134e4a; color:#fff; padding:14px 24px; }
+  header h1 { margin:0; font-size:18px; }
+  header .sub { font-size:12px; opacity:.85; margin-top:4px; }
+  main { max-width:1240px; margin:20px auto; padding:0 16px;
+         display:grid; grid-template-columns:400px 1fr; gap:16px; align-items:start; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:16px; }
+  .card h2 { margin:0 0 10px; font-size:14px; }
+  button { background:var(--pri); color:#fff; border:0; border-radius:8px; padding:8px 14px; font-size:13px; cursor:pointer; }
+  button.ghost { background:#e6f4f2; color:var(--pri); }
+  button.mini { padding:3px 8px; font-size:12px; }
+  button.danger { background:#fee2e2; color:var(--warn); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  input[type=text] { padding:7px; border:1px solid var(--line); border-radius:6px; font-size:13px; width:100%; }
+  textarea { width:100%; border:1px solid var(--line); border-radius:6px; padding:8px;
+             font-family:Consolas,monospace; font-size:12.5px; resize:vertical; line-height:1.5; }
+  .fn-item { border:1px solid var(--line); border-radius:8px; padding:8px 10px; margin-bottom:8px;
+             cursor:pointer; display:flex; gap:8px; align-items:center; }
+  .fn-item:hover { border-color:var(--pri); }
+  .fn-item.sel { border-color:var(--pri); background:#f0fdfa; }
+  .fn-item .name { font-family:Consolas,monospace; font-size:13px; font-weight:600; }
+  .fn-item .desc { font-size:11.5px; color:#64748b; }
+  .fn-item .grow { flex:1; min-width:0; }
+  .badge { font-size:10px; color:#0f766e; background:#ccfbf1; border-radius:4px; padding:1px 5px; vertical-align:middle; }
+  .comp-item { display:flex; gap:8px; align-items:center; border:1px solid var(--line);
+               border-radius:8px; padding:6px 10px; margin-bottom:6px; background:#fafafa; }
+  .comp-item .name { font-family:Consolas,monospace; font-size:13px; flex:1; }
+  .comp-item .ord { color:#94a3b8; font-size:12px; width:20px; }
+  pre#preview { background:#0f172a; color:#e2e8f0; padding:14px; border-radius:8px;
+                overflow:auto; font-size:12px; line-height:1.5; max-height:480px; margin:10px 0 0; }
+  .msg { font-size:12px; margin-left:8px; }
+  .msg.ok { color:#16a34a; } .msg.err { color:var(--warn); }
+  .warnbox { background:#fef9c3; border:1px solid #fde047; border-radius:8px;
+             padding:8px 10px; font-size:12px; margin-top:8px; }
+  .hint { font-size:11.5px; color:#64748b; margin-top:6px; }
+  label.f { display:block; font-size:12px; color:#475569; margin-top:10px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Shell Script 功能積木組合器</h1>
+  <div class="sub">把常用 shell 功能做成積木(function),點選組合、即時預覽,輸出可直接在 Linux 執行的 .sh</div>
+</header>
+<main>
+
+  <div>
+    <div class="card">
+      <h2>🧱 積木庫 <button class="ghost mini" id="newBtn" style="float:right;">➕ 新增積木</button></h2>
+      <div id="fnList"></div>
+      <button class="ghost mini" id="restoreBtn">↩ 還原內建範例</button>
+      <span class="msg" id="listMsg"></span>
+    </div>
+
+    <div class="card" id="editorCard">
+      <h2 id="editorTitle">✏️ 編輯積木</h2>
+      <label class="f">函式名稱(英文/數字/底線,不能以數字開頭)
+        <input type="text" id="ed_name" placeholder="check_something"></label>
+      <label class="f">說明
+        <input type="text" id="ed_desc" placeholder="這個積木做什麼"></label>
+      <label class="f">函式內容(bash,不用寫 name() { },只寫本體)
+        <textarea id="ed_content" rows="12" spellcheck="false"></textarea></label>
+      <div style="margin-top:10px;">
+        <button id="saveBtn">💾 儲存</button>
+        <button class="danger" id="delBtn">🗑 刪除</button>
+        <span class="msg" id="edMsg"></span>
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <div class="card">
+      <h2>🧩 組合區(從積木庫按「加入」,可排序/移除)</h2>
+      <div id="compList"></div>
+      <div id="compEmpty" class="hint">尚未加入任何積木。</div>
+      <div style="display:flex; gap:10px; align-items:center; margin-top:12px; flex-wrap:wrap;">
+        <label style="font-size:13px;">腳本檔名
+          <input type="text" id="scriptName" value="my_toolkit" style="width:160px; margin-left:4px;"></label>
+        <label style="font-size:13px;"><input type="checkbox" id="stopOnErr" style="vertical-align:middle;">
+          任一積木失敗即中止</label>
+      </div>
+      <div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;">
+        <button id="dlBtn">⬇ 下載 .sh</button>
+        <button class="ghost" id="saveShBtn">💾 存到 output/</button>
+        <button class="ghost" id="copyBtn">📋 複製</button>
+        <button class="ghost" id="lintBtn">✔ 語法檢查</button>
+        <span class="msg" id="compMsg"></span>
+      </div>
+      <div id="warnBox" class="warnbox" style="display:none;"></div>
+      <pre id="preview">(加入積木後這裡會即時顯示產生的腳本)</pre>
+    </div>
+  </div>
+
+</main>
+
+<script>
+let functions = [];   // 積木庫
+let comp = [];        // 組合區:積木 id 陣列(有順序)
+let selectedId = null;  // 正在編輯的積木 id;null = 新增模式
+let lastScript = '';
+
+const $ = id => document.getElementById(id);
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function msg(id, text, ok) {
+  const el = $(id);
+  el.textContent = text; el.className = 'msg ' + (ok ? 'ok' : 'err');
+  setTimeout(() => { el.textContent = ''; }, 3000);
+}
+
+// ---------- 積木庫 ----------
+async function loadFunctions() {
+  const d = await (await fetch('/api/functions')).json();
+  functions = d.functions || [];
+  // 組合區清掉已被刪除的積木
+  comp = comp.filter(id => functions.some(f => f.id === id));
+  renderAll();
+}
+
+function renderAll() {
+  renderList(); renderComp(); refreshPreview();
+  localStorage.setItem('comp', JSON.stringify(comp));
+}
+
+function renderList() {
+  const box = $('fnList');
+  box.innerHTML = '';
+  if (!functions.length)
+    box.innerHTML = '<div class="hint">積木庫是空的,按「還原內建範例」或「新增積木」。</div>';
+  functions.forEach(f => {
+    const div = document.createElement('div');
+    div.className = 'fn-item' + (f.id === selectedId ? ' sel' : '');
+    div.innerHTML = `
+      <div class="grow">
+        <div class="name">${esc(f.name)} ${f.builtin ? '<span class="badge">內建</span>' : ''}</div>
+        <div class="desc">${esc(f.description || '')}</div>
+      </div>
+      <button class="ghost mini">加入 ➜</button>`;
+    div.onclick = () => selectFn(f.id);
+    div.querySelector('button').onclick = (e) => { e.stopPropagation(); addToComp(f.id); };
+    box.appendChild(div);
+  });
+}
+
+function selectFn(id) {
+  selectedId = id;
+  const f = functions.find(x => x.id === id);
+  $('editorTitle').textContent = '✏️ 編輯積木';
+  $('ed_name').value = f.name; $('ed_desc').value = f.description || '';
+  $('ed_content').value = f.content;
+  $('delBtn').style.display = '';
+  renderList();
+}
+
+$('newBtn').onclick = () => {
+  selectedId = null;
+  $('editorTitle').textContent = '➕ 新增積木';
+  $('ed_name').value = ''; $('ed_desc').value = ''; $('ed_content').value = '';
+  $('delBtn').style.display = 'none';
+  renderList();
+  $('ed_name').focus();
+};
+
+$('saveBtn').onclick = async () => {
+  const body = { name: $('ed_name').value.trim(),
+                 description: $('ed_desc').value.trim(),
+                 content: $('ed_content').value };
+  const url = selectedId ? '/api/functions/' + selectedId : '/api/functions';
+  const r = await fetch(url, { method: selectedId ? 'PUT' : 'POST',
+    headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  const d = await r.json();
+  if (!r.ok) { msg('edMsg', d.error || '儲存失敗', false); return; }
+  if (!selectedId) selectedId = d.function.id;
+  msg('edMsg', '已儲存 ✓', true);
+  await loadFunctions();
+  selectFn(selectedId);
+};
+
+$('delBtn').onclick = async () => {
+  if (!selectedId) return;
+  const f = functions.find(x => x.id === selectedId);
+  if (!confirm(`確定刪除積木「${f.name}」?`)) return;
+  const r = await fetch('/api/functions/' + selectedId, { method: 'DELETE' });
+  if (!r.ok) { msg('edMsg', '刪除失敗', false); return; }
+  selectedId = null; $('newBtn').onclick();
+  msg('edMsg', '已刪除', true);
+  await loadFunctions();
+};
+
+$('restoreBtn').onclick = async () => {
+  const d = await (await fetch('/api/functions/restore', { method:'POST' })).json();
+  msg('listMsg', d.added ? `補回 ${d.added} 個內建範例` : '內建範例都在,未變動', true);
+  await loadFunctions();
+};
+
+// ---------- 組合區 ----------
+function addToComp(id) { comp.push(id); renderAll(); }
+
+function renderComp() {
+  const box = $('compList');
+  box.innerHTML = '';
+  $('compEmpty').style.display = comp.length ? 'none' : '';
+  comp.forEach((id, i) => {
+    const f = functions.find(x => x.id === id);
+    const div = document.createElement('div');
+    div.className = 'comp-item';
+    div.innerHTML = `
+      <span class="ord">${i + 1}.</span><span class="name">${esc(f.name)}</span>
+      <button class="ghost mini" ${i === 0 ? 'disabled' : ''}>↑</button>
+      <button class="ghost mini" ${i === comp.length - 1 ? 'disabled' : ''}>↓</button>
+      <button class="danger mini">✕</button>`;
+    const [up, down, del] = div.querySelectorAll('button');
+    up.onclick = () => { [comp[i-1], comp[i]] = [comp[i], comp[i-1]]; renderAll(); };
+    down.onclick = () => { [comp[i+1], comp[i]] = [comp[i], comp[i+1]]; renderAll(); };
+    del.onclick = () => { comp.splice(i, 1); renderAll(); };
+    box.appendChild(div);
+  });
+}
+
+// ---------- 預覽 / 匯出 ----------
+let previewTimer = null;
+function refreshPreview() {
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(doCompose, 200);
+}
+
+async function doCompose(save = false) {
+  if (!comp.length) {
+    lastScript = '';
+    $('preview').textContent = '(加入積木後這裡會即時顯示產生的腳本)';
+    $('warnBox').style.display = 'none';
+    return null;
+  }
+  const r = await fetch('/api/compose', { method:'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ ids: comp, script_name: $('scriptName').value.trim(),
+                           stop_on_error: $('stopOnErr').checked, save }) });
+  const d = await r.json();
+  if (!r.ok) { msg('compMsg', d.error || '產生失敗', false); return null; }
+  lastScript = d.script;
+  $('preview').textContent = d.script;
+  const wb = $('warnBox');
+  if (d.warnings && d.warnings.length) {
+    wb.style.display = ''; wb.textContent = '⚠️ ' + d.warnings.join('|');
+  } else wb.style.display = 'none';
+  return d;
+}
+$('scriptName').oninput = refreshPreview;
+$('stopOnErr').onchange = refreshPreview;
+
+$('dlBtn').onclick = async () => {
+  const d = await doCompose();
+  if (!d) { if (!comp.length) msg('compMsg', '請先加入積木', false); return; }
+  const name = ($('scriptName').value.trim() || 'composed') + '.sh';
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([d.script], { type:'text/x-shellscript' }));
+  a.download = name; a.click();
+  URL.revokeObjectURL(a.href);
+};
+
+$('saveShBtn').onclick = async () => {
+  if (!comp.length) { msg('compMsg', '請先加入積木', false); return; }
+  const d = await doCompose(true);
+  if (d && d.saved_path) msg('compMsg', '已存到 ' + d.saved_path, true);
+};
+
+$('copyBtn').onclick = async () => {
+  const d = await doCompose();
+  if (!d) { if (!comp.length) msg('compMsg', '請先加入積木', false); return; }
+  try { await navigator.clipboard.writeText(d.script); msg('compMsg', '已複製 ✓', true); }
+  catch { msg('compMsg', '複製失敗(瀏覽器限制)', false); }
+};
+
+$('lintBtn').onclick = async () => {
+  const d = await doCompose();
+  if (!d) { if (!comp.length) msg('compMsg', '請先加入積木', false); return; }
+  const r = await (await fetch('/api/lint', { method:'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ script: d.script }) })).json();
+  if (!r.available) msg('compMsg', r.output, false);
+  else if (r.ok) msg('compMsg', '✔ ' + r.output, true);
+  else alert('語法檢查結果:\n' + r.output);
+};
+
+// ---------- 啟動 ----------
+(async () => {
+  try { comp = JSON.parse(localStorage.getItem('comp') || '[]'); } catch { comp = []; }
+  $('delBtn').style.display = 'none';
+  await loadFunctions();
+})();
+</script>
+</body>
+</html>
