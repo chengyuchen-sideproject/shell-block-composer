@@ -1,77 +1,82 @@
-# Shell Script 功能積木組合器
+# Shell Script Block Composer
 
-把常用的 shell 功能做成「積木」(每塊 = 一個 bash function),在網頁 GUI 上
-點選組合、即時預覽,輸出一支可直接在 Linux 執行的 `.sh` 腳本。
+**English** | [繁體中文](README.zh-TW.md)
 
-## 啟動
+Turn common shell tasks into reusable **blocks** (each block = one bash function),
+then point-and-click to combine them in a web GUI and export a single `.sh`
+script that runs as-is on Linux.
 
-雙擊 `start.bat`(只需要 Python 3.10+,**不用安裝任何套件**),
-或 `python run.py`。瀏覽器會自動開 http://127.0.0.1:8010(只綁本機)。
+## Run
 
-## 使用方式
+Double-click `start.bat` (only Python 3.10+ is required — **no packages to
+install**), or run `python run.py`. Your browser opens
+http://127.0.0.1:8010 automatically (bound to localhost only).
 
-1. **積木庫**(左):內建 4 個範例(檢查系統負載、檢查 SGE 服務、
-   備份系統設定檔、檢查磁碟使用率)。點積木可編輯名稱/說明/內容,
-   「➕ 新增積木」加自己的;內建範例誤刪可「↩ 還原」。
-   - 積木內容 = function 本體(不用寫 `name() { }`,產生器會包)
-2. **組合區**(右):按積木上的「加入 ➜」,可上下排序、移除;
-   預覽即時更新。執行方式三選一:
-   - **依序執行(失敗不中斷)**:逐塊跑完,結尾回報失敗清單
-   - **依序執行(失敗即中止)**:任一積木失敗就停
-   - **並行執行**:每塊丟背景(`&`)同時跑、輸出各自導暫存檔避免交錯,
-     再依序 `wait` 收斂、逐塊印出與收集結束碼。適合互不相依的檢查類積木;
-     並行是子 shell,積木間不能共享變數、不保證先後順序。
-3. **SSH 機器清單並行**:組合區每塊積木可勾「🖧 SSH清單」——勾了之後,
-   該積木的內容會透過 `xargs -P` **同時 SSH 到機器清單上的每一台機器執行**
-   (適合幾百~幾千台批次巡檢/操作)。設定區可指定清單檔與同時連線數。
-   - 機器清單:一行一台(可 `user@host`,`#` 開頭是註解)。
-     **路徑放哪**:預設 `hosts.txt` 會以「.sh 檔所在目錄」為基準,
-     也就是把清單放在跟腳本同一個資料夾即可;或給絕對路徑。
-     執行時還能用 `HOST_LIST=路徑 SSH_PARALLEL=數量 bash xxx.sh` 覆寫預設
-   - 原理:`declare -f` 把積木內容原樣送到遠端 `bash -s` 執行(免先佈腳本),
-     每台輸出各自成塊避免交錯,結束後統計成功/失敗台數
-   - 前提:目標機已佈好 SSH 金鑰(用 `BatchMode=yes` 不問密碼,連不上記失敗)
-4. **積木群組**:按「📦 建立群組」開一個容器,把幾個積木放進去,
-   對**整組**勾一次 SSH。用途:
-   - 想對同一批機器連續做好幾件事(例如「查磁碟 → 寫 log」),不必每塊各勾 SSH
-   - 群組勾 SSH 時,對每台機器**只開一條 ssh 連線、在遠端依序跑完組內所有積木**
-     (幾千台時比每塊各自 fan-out 省下大量連線)
-   - 群組不勾 SSH 則在本機依序執行組內積木,且**同一個 shell**——
-     前一塊 `export` 的變數,後面的積木(如 log 積木)讀得到
-5. **輸出**:下載 .sh / 存到 `output/`(固定 LF 換行,拿到 Linux 直接
-   `bash xxx.sh` 可跑)/ 複製 / 語法檢查(需 Git for Windows 的 bash)。
+## How it works
 
-## SSH fan-out 產生的腳本長怎樣
+1. **Block library** (left): ships with 4 examples (check system load, check
+   SGE service, back up system config, check disk usage). Click a block to edit
+   its name / description / content; "➕ New block" to add your own; deleted
+   built-ins can be brought back with "↩ Restore defaults".
+   - A block's content is the function *body* (no need to write `name() { }`,
+     the generator wraps it). Generated script text is English.
+2. **Composition area** (right): click "Add ➜" on a block; reorder / remove;
+   the preview updates live. Pick one of three execution modes:
+   - **Sequential (don't stop on error)**: run every block, report failures at the end
+   - **Sequential (stop on error)**: stop at the first failing block
+   - **Parallel**: launch each unit in the background (`&`) at the same time,
+     each output redirected to its own temp file to avoid interleaving, then
+     `wait` in order and collect exit codes. Parallel units are subshells:
+     they can't share variables and order isn't guaranteed.
+3. **SSH fan-out to a host list**: each block in the composition area has a
+   "🖧 SSH list" checkbox — check it and the block's content is sent, via
+   `xargs -P`, to **every machine in a host list at the same time** (great for
+   hundreds/thousands of machines). The settings panel sets the list file and
+   the concurrency.
+   - Host list: one host per line (`user@host` allowed, `#` starts a comment).
+     **Where to put it**: the default `hosts.txt` is resolved relative to the
+     `.sh` file's own directory, so just put it in the same folder as the
+     script; or use an absolute path. At run time you can override with
+     `HOST_LIST=path SSH_PARALLEL=count bash xxx.sh`.
+   - How: `declare -f` ships the block's function to the remote `bash -s`
+     as-is (no need to pre-deploy a script), each host's output is printed as
+     one block to avoid interleaving, and success/failure counts are tallied.
+   - Prerequisite: SSH keys already set up on the targets (uses `BatchMode=yes`,
+     never prompts for a password; unreachable hosts are recorded as failures).
+4. **Block groups**: click "📦 New group" to create a container, drop several
+   blocks in, and toggle SSH once for the **whole group**. Uses:
+   - Do several things in a row on the same set of machines (e.g. "check disk →
+     write log") without checking SSH on each block.
+   - With SSH on, the group opens **one ssh connection per host and runs all
+     member blocks sequentially on that host** (far fewer connections than
+     fanning out each block separately when you have thousands of machines).
+   - Without SSH, group members run sequentially **in the same shell**, so a
+     variable a block `export`s can be read by a later block (e.g. a log block).
+5. **Output**: download `.sh` / save to `output/` (fixed LF line endings, runs
+   directly on Linux with `bash xxx.sh`) / copy / syntax check (needs the bash
+   from Git for Windows).
+
+## What an SSH fan-out script looks like
 
 ```bash
-check_load__task() { uptime; free -h; }   # ← 你的積木內容 = 送到每台機器執行
-check_load() {
-    hostfile="${HOST_LIST:-hosts.txt}"; par="${SSH_PARALLEL:-50}"
-    export _FANOUT_CMD="$(declare -f check_load__task); check_load__task"
+check_load() { uptime; free -h; }   # ← your block content = run on each host
+__sbc_unit_0() {                    # the SSH fan-out runner for that block
+    hostfile="$(__sbc_hostfile)"; par="${SSH_PARALLEL:-50}"
+    export _SBC_FANOUT="$(declare -f check_load); check_load"
     grep -Ev '^\s*(#|$)' "$hostfile" \
       | xargs -r -P "$par" -n 1 -- bash -c '
           out=$(ssh -o BatchMode=yes -o ConnectTimeout=5 "$1" bash -s \
-                <<<"$_FANOUT_CMD" 2>&1)
-          printf "%s\n" "───── $1 ─────\n$out"' _
-    # …統計成功/失敗台數
+                <<<"$_SBC_FANOUT" 2>&1)
+          printf "%s\n" "----- $1 -----\n$out"' _
+    # …tally success/failure counts
 }
 ```
 
-## 產出腳本結構
+For an SSH **group**, the exported payload is
+`$(declare -f blockA blockB); blockA; blockB` — several functions in one ssh
+session, run in order on each host.
 
-```bash
-#!/usr/bin/env bash
-set -u
-check_system_load() { ... }   # 各積木 = 獨立 function,可單獨 source 取用
-...
-main() {                      # 依組合順序執行,結尾回報失敗清單
-    check_system_load || failed+=("check_system_load")
-    ...
-}
-main "$@"
-```
+## Data
 
-## 資料
-
-- 積木存 `data/functions.json`(僅本機)
-- 產出腳本存 `output/`
+- Blocks are stored in `data/functions.json` (local only)
+- Generated scripts are saved under `output/`
