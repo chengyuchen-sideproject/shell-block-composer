@@ -84,9 +84,16 @@
       <div style="display:flex; gap:10px; align-items:center; margin-top:12px; flex-wrap:wrap;">
         <label style="font-size:13px;">腳本檔名
           <input type="text" id="scriptName" value="my_toolkit" style="width:160px; margin-left:4px;"></label>
-        <label style="font-size:13px;"><input type="checkbox" id="stopOnErr" style="vertical-align:middle;">
-          任一積木失敗即中止</label>
+        <label style="font-size:13px;">執行方式
+          <select id="execMode" style="width:auto; padding:6px; border:1px solid var(--line); border-radius:6px; font-size:13px; margin-left:4px;">
+            <option value="sequential">依序執行(失敗不中斷)</option>
+            <option value="stop_on_error">依序執行(失敗即中止)</option>
+            <option value="parallel">並行執行(全部同時跑)</option>
+          </select></label>
       </div>
+      <div class="hint" id="modeHint" style="display:none;">
+        ⚠️ 並行模式:各積木在子 shell 同時跑,彼此<b>不能共享變數、不保證先後順序</b>;
+        輸出各自暫存、結束後依加入順序完整印出。有相依關係的積木請用依序模式。</div>
       <div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;">
         <button id="dlBtn">⬇ 下載 .sh</button>
         <button class="ghost" id="saveShBtn">💾 存到 output/</button>
@@ -244,7 +251,7 @@ async function doCompose(save = false) {
   const r = await fetch('/api/compose', { method:'POST',
     headers: {'Content-Type':'application/json'},
     body: JSON.stringify({ ids: comp, script_name: $('scriptName').value.trim(),
-                           stop_on_error: $('stopOnErr').checked, save }) });
+                           mode: $('execMode').value, save }) });
   const d = await r.json();
   if (!r.ok) { msg('compMsg', d.error || '產生失敗', false); return null; }
   lastScript = d.script;
@@ -256,7 +263,10 @@ async function doCompose(save = false) {
   return d;
 }
 $('scriptName').oninput = refreshPreview;
-$('stopOnErr').onchange = refreshPreview;
+$('execMode').onchange = () => {
+  $('modeHint').style.display = $('execMode').value === 'parallel' ? '' : 'none';
+  refreshPreview();
+};
 
 $('dlBtn').onclick = async () => {
   const d = await doCompose();

@@ -37,11 +37,15 @@ def _indent(body: str) -> str:
 
 
 def generate_script(funcs: list[dict], script_name: str = "composed",
-                    stop_on_error: bool = False) -> tuple[str, list[str]]:
+                    mode: str = "sequential") -> tuple[str, list[str]]:
     """組出完整腳本。回傳(腳本文字, 警告清單)。
 
-    stop_on_error=True 時 main 內任一積木失敗即中止(&&串接);
-    預設每個積木獨立執行、失敗不影響後面,最後回報失敗清單。
+    mode:
+      sequential    依序執行,失敗不中斷,最後回報失敗清單(預設)
+      stop_on_error 依序執行,任一積木失敗即中止
+      parallel      並行執行:每塊丟背景(&)同時跑,輸出各自導暫存檔避免交錯,
+                    再依啟動順序 wait 收斂、逐塊印出與收集結束碼。
+                    注意:並行是子 shell,積木間不能共享變數、不保證先後。
     """
     warnings: list[str] = []
     seen: set[str] = set()
@@ -54,7 +58,9 @@ def generate_script(funcs: list[dict], script_name: str = "composed",
     out = [
         "#!/usr/bin/env bash",
         f"# {script_name}.sh — 由 Shell Script 功能積木組合器產生({now})",
-        "# 各功能為獨立 function,可單獨取用;整支執行則依序全跑。",
+        ("# 各功能為獨立 function,可單獨取用;整支執行則「並行」全跑。"
+         if mode == "parallel" else
+         "# 各功能為獨立 function,可單獨取用;整支執行則依序全跑。"),
         "set -u",
         "",
     ]
@@ -66,20 +72,44 @@ def generate_script(funcs: list[dict], script_name: str = "composed",
         out.append("}")
         out.append("")
 
+    report = [  # 結尾共用:回報失敗清單(sequential / parallel 共用)
+        '    echo ""',
+        '    if [ "${#failed[@]}" -gt 0 ]; then',
+        '        echo "[結果] 失敗項目: ${failed[*]}" >&2',
+        "        return 1",
+        "    fi",
+        '    echo "[結果] 全部完成"',
+    ]
+
     out.append('main() {')
-    if stop_on_error:
+    if mode == "stop_on_error":
         for f in funcs:
             out.append(f"    {f['name']} || {{ echo \"[中止] {f['name']} 失敗\" >&2; return 1; }}")
+    elif mode == "parallel":
+        out.append("    local tmpdir")
+        out.append('    tmpdir=$(mktemp -d) || { echo "[錯誤] 無法建立暫存目錄" >&2; return 1; }')
+        out.append("    local pids=() names=()")
+        out.append("")
+        out.append("    # 每塊丟背景同時跑;輸出導到各自的暫存檔,避免交錯")
+        for i, f in enumerate(funcs):
+            out.append(f'    {f["name"]} > "$tmpdir/{i:02d}.log" 2>&1 &')
+            out.append(f'    pids+=($!); names+=("{f["name"]}")')
+        out.append("")
+        out.append("    # 依啟動順序等待,逐塊取回結束碼並印出輸出")
+        out.append("    local failed=() i rc")
+        out.append('    for i in "${!pids[@]}"; do')
+        out.append('        rc=0; wait "${pids[$i]}" || rc=$?')
+        out.append('        printf \'───── %s (exit=%s) ─────\\n\' "${names[$i]}" "$rc"')
+        out.append('        cat "$(printf \'%s/%02d.log\' "$tmpdir" "$i")"')
+        out.append('        if [ "$rc" -ne 0 ]; then failed+=("${names[$i]}"); fi')
+        out.append("    done")
+        out.append('    rm -rf "$tmpdir"')
+        out.extend(report)
     else:
         out.append("    local failed=()")
         for f in funcs:
             out.append(f"    {f['name']} || failed+=(\"{f['name']}\")")
-        out.append('    echo ""')
-        out.append('    if [ "${#failed[@]}" -gt 0 ]; then')
-        out.append('        echo "[結果] 失敗項目: ${failed[*]}" >&2')
-        out.append("        return 1")
-        out.append("    fi")
-        out.append('    echo "[結果] 全部完成"')
+        out.extend(report)
     out.append("}")
     out.append("")
     out.append('main "$@"')

@@ -150,9 +150,12 @@ class Handler(BaseHTTPRequestHandler):
         name = (d.get("script_name") or "composed").strip() or "composed"
         if not _SAFE_FILENAME.match(name):
             return self._err("腳本檔名只能用英文、數字、底線、減號(1-64字)")
+        mode = d.get("mode") or ("stop_on_error" if d.get("stop_on_error")
+                                 else "sequential")
+        if mode not in ("sequential", "stop_on_error", "parallel"):
+            return self._err("未知的執行模式")
         script, warnings = composer.generate_script(
-            [by_id[i] for i in ids], name,
-            stop_on_error=bool(d.get("stop_on_error")))
+            [by_id[i] for i in ids], name, mode=mode)
         resp = {"script": script, "warnings": warnings}
         if d.get("save"):
             path = storage.OUTPUT_DIR / f"{name}.sh"
