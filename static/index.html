@@ -81,6 +81,18 @@
       <h2>🧩 組合區(從積木庫按「加入」,可排序/移除)</h2>
       <div id="compList"></div>
       <div id="compEmpty" class="hint">尚未加入任何積木。</div>
+      <div id="sshBox" style="display:none; margin-top:12px; padding:10px 12px; background:#eff6ff; border:1px solid #bfdbfe; border-radius:8px;">
+        <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap; font-size:13px;">
+          <b>🖧 SSH 機器清單設定</b>
+          <label>清單檔
+            <input type="text" id="hostFile" value="hosts.txt" style="width:180px; margin-left:4px;"></label>
+          <label>同時連線數
+            <input type="text" id="sshPar" value="50" style="width:60px; margin-left:4px;"></label>
+        </div>
+        <div class="hint">清單一行一台(可 <code>user@host</code>,<code>#</code> 註解);執行時可用
+          <code>HOST_LIST=路徑 SSH_PARALLEL=數量</code> 覆寫。需事先佈好 SSH 金鑰
+          (BatchMode 不會問密碼,連不上直接記失敗)。</div>
+      </div>
       <div style="display:flex; gap:10px; align-items:center; margin-top:12px; flex-wrap:wrap;">
         <label style="font-size:13px;">腳本檔名
           <input type="text" id="scriptName" value="my_toolkit" style="width:160px; margin-left:4px;"></label>
@@ -130,7 +142,7 @@ async function loadFunctions() {
   const d = await (await fetch('/api/functions')).json();
   functions = d.functions || [];
   // 組合區清掉已被刪除的積木
-  comp = comp.filter(id => functions.some(f => f.id === id));
+  comp = comp.filter(c => functions.some(f => f.id === c.id));
   renderAll();
 }
 
@@ -211,27 +223,33 @@ $('restoreBtn').onclick = async () => {
 };
 
 // ---------- 組合區 ----------
-function addToComp(id) { comp.push(id); renderAll(); }
+// comp 每項 = { id, ssh }。ssh=true 時該積木內容改為
+// 「透過 xargs -P 對 SSH 機器清單上所有機器並行執行」。
+function addToComp(id) { comp.push({ id, ssh: false }); renderAll(); }
 
 function renderComp() {
   const box = $('compList');
   box.innerHTML = '';
   $('compEmpty').style.display = comp.length ? 'none' : '';
-  comp.forEach((id, i) => {
-    const f = functions.find(x => x.id === id);
+  comp.forEach((c, i) => {
+    const f = functions.find(x => x.id === c.id);
     const div = document.createElement('div');
     div.className = 'comp-item';
     div.innerHTML = `
       <span class="ord">${i + 1}.</span><span class="name">${esc(f.name)}</span>
+      <label style="font-size:11.5px; color:#1d4ed8; white-space:nowrap;" title="勾選後,此積木的內容會透過 xargs 並行 SSH 到機器清單上的每一台執行">
+        <input type="checkbox" class="ssh-cb" ${c.ssh ? 'checked' : ''}> 🖧 SSH清單</label>
       <button class="ghost mini" ${i === 0 ? 'disabled' : ''}>↑</button>
       <button class="ghost mini" ${i === comp.length - 1 ? 'disabled' : ''}>↓</button>
       <button class="danger mini">✕</button>`;
-    const [up, down, del] = div.querySelectorAll('button');
+    div.querySelector('.ssh-cb').onchange = (e) => { c.ssh = e.target.checked; renderAll(); };
+    const [up, down, del] = div.querySelectorAll('button:not(.ssh-cb)');
     up.onclick = () => { [comp[i-1], comp[i]] = [comp[i], comp[i-1]]; renderAll(); };
     down.onclick = () => { [comp[i+1], comp[i]] = [comp[i], comp[i+1]]; renderAll(); };
     del.onclick = () => { comp.splice(i, 1); renderAll(); };
     box.appendChild(div);
   });
+  $('sshBox').style.display = comp.some(c => c.ssh) ? '' : 'none';
 }
 
 // ---------- 預覽 / 匯出 ----------
@@ -250,8 +268,11 @@ async function doCompose(save = false) {
   }
   const r = await fetch('/api/compose', { method:'POST',
     headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ ids: comp, script_name: $('scriptName').value.trim(),
-                           mode: $('execMode').value, save }) });
+    body: JSON.stringify({ items: comp, script_name: $('scriptName').value.trim(),
+                           mode: $('execMode').value,
+                           host_list: $('hostFile').value.trim(),
+                           ssh_parallel: parseInt($('sshPar').value, 10) || 50,
+                           save }) });
   const d = await r.json();
   if (!r.ok) { msg('compMsg', d.error || '產生失敗', false); return null; }
   lastScript = d.script;
@@ -263,6 +284,8 @@ async function doCompose(save = false) {
   return d;
 }
 $('scriptName').oninput = refreshPreview;
+$('hostFile').oninput = refreshPreview;
+$('sshPar').oninput = refreshPreview;
 $('execMode').onchange = () => {
   $('modeHint').style.display = $('execMode').value === 'parallel' ? '' : 'none';
   refreshPreview();
@@ -304,7 +327,11 @@ $('lintBtn').onclick = async () => {
 
 // ---------- 啟動 ----------
 (async () => {
-  try { comp = JSON.parse(localStorage.getItem('comp') || '[]'); } catch { comp = []; }
+  try {
+    comp = JSON.parse(localStorage.getItem('comp') || '[]');
+    // 相容舊格式(純 id 字串陣列)
+    comp = comp.map(c => typeof c === 'string' ? { id: c, ssh: false } : c);
+  } catch { comp = []; }
   $('delBtn').style.display = 'none';
   await loadFunctions();
 })();

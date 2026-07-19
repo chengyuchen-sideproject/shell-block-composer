@@ -24,6 +24,8 @@ import storage
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 # 輸出檔名只允許安全字元,防路徑穿越
 _SAFE_FILENAME = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
+# 機器清單路徑白名單:字母數字與常見路徑字元(擋掉 shell 元字元)
+_SAFE_HOSTPATH = re.compile(r"^[A-Za-z0-9._/\\\- ]{1,200}$")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -140,12 +142,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def _compose(self):
         d = self._body()
-        ids = d.get("ids") or []
-        if not ids:
+        # 新格式 items=[{id, ssh}];舊格式 ids=[...] 向後相容
+        items = d.get("items")
+        if items is None:
+            items = [{"id": i} for i in (d.get("ids") or [])]
+        if not items:
             return self._err("尚未加入任何積木")
         by_id = {f["id"]: f for f in storage.load_functions()}
-        missing = [i for i in ids if i not in by_id]
-        if missing:
+        if any(it.get("id") not in by_id for it in items):
             return self._err("有積木已被刪除,請從組合區移除後重試")
         name = (d.get("script_name") or "composed").strip() or "composed"
         if not _SAFE_FILENAME.match(name):
@@ -154,8 +158,21 @@ class Handler(BaseHTTPRequestHandler):
                                  else "sequential")
         if mode not in ("sequential", "stop_on_error", "parallel"):
             return self._err("未知的執行模式")
+        host_list = str(d.get("host_list") or "hosts.txt").strip() or "hosts.txt"
+        if not _SAFE_HOSTPATH.match(host_list):
+            return self._err("機器清單路徑只允許字母、數字與 . _ - / 和空白")
+        raw_par = d.get("ssh_parallel")
+        try:
+            ssh_parallel = 50 if raw_par is None else int(raw_par)
+        except (TypeError, ValueError):
+            return self._err("並行數必須是整數")
+        if not (1 <= ssh_parallel <= 2000):
+            return self._err("並行數需在 1~2000 之間")
+        funcs = [{**by_id[it["id"]], "ssh_fanout": bool(it.get("ssh"))}
+                 for it in items]
         script, warnings = composer.generate_script(
-            [by_id[i] for i in ids], name, mode=mode)
+            funcs, name, mode=mode,
+            host_list=host_list, ssh_parallel=ssh_parallel)
         resp = {"script": script, "warnings": warnings}
         if d.get("save"):
             path = storage.OUTPUT_DIR / f"{name}.sh"
