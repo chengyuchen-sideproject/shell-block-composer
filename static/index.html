@@ -35,6 +35,18 @@
                border-radius:8px; padding:6px 10px; margin-bottom:6px; background:#fafafa; }
   .comp-item .name { font-family:Consolas,monospace; font-size:13px; flex:1; }
   .comp-item .ord { color:#94a3b8; font-size:12px; width:20px; }
+  .comp-group { border:1px solid #c7d2fe; border-radius:8px; margin-bottom:6px;
+                background:#f5f7ff; }
+  .comp-group .gh { display:flex; gap:8px; align-items:center; padding:6px 10px;
+                    border-bottom:1px dashed #c7d2fe; }
+  .comp-group .gh .gname { font-size:12.5px; font-weight:600; width:130px; }
+  .comp-group .gbody { padding:6px 10px 6px 22px; }
+  .comp-group .gmember { display:flex; gap:6px; align-items:center; padding:3px 0;
+                         font-family:Consolas,monospace; font-size:12.5px; }
+  .comp-group .gmember .mname { flex:1; }
+  .comp-group .gfoot { padding:4px 10px 8px 22px; display:flex; gap:6px; align-items:center; }
+  .comp-group .gfoot select { font-size:12px; padding:4px; max-width:200px; }
+  .gtag { font-size:10px; color:#4338ca; background:#e0e7ff; border-radius:4px; padding:1px 6px; }
   pre#preview { background:#0f172a; color:#e2e8f0; padding:14px; border-radius:8px;
                 overflow:auto; font-size:12px; line-height:1.5; max-height:480px; margin:10px 0 0; }
   .msg { font-size:12px; margin-left:8px; }
@@ -78,7 +90,9 @@
 
   <div>
     <div class="card">
-      <h2>🧩 組合區(從積木庫按「加入」,可排序/移除)</h2>
+      <h2>🧩 組合區
+        <button class="ghost mini" id="newGroupBtn" style="float:right;">📦 建立群組</button></h2>
+      <div class="hint" style="margin-bottom:8px;">從積木庫按「加入」放入積木;或建立群組,把幾個積木放進去、對整組勾一次 SSH。</div>
       <div id="compList"></div>
       <div id="compEmpty" class="hint">尚未加入任何積木。</div>
       <div id="sshBox" style="display:none; margin-top:12px; padding:10px 12px; background:#eff6ff; border:1px solid #bfdbfe; border-radius:8px;">
@@ -141,8 +155,10 @@ function msg(id, text, ok) {
 async function loadFunctions() {
   const d = await (await fetch('/api/functions')).json();
   functions = d.functions || [];
-  // 組合區清掉已被刪除的積木
-  comp = comp.filter(c => functions.some(f => f.id === c.id));
+  const has = id => functions.some(f => f.id === id);
+  // 組合區清掉已被刪除的積木(群組內成員也一併清)
+  comp.forEach(c => { if (c.kind === 'group') c.ids = c.ids.filter(has); });
+  comp = comp.filter(c => c.kind === 'group' ? true : has(c.id));
   renderAll();
 }
 
@@ -223,31 +239,107 @@ $('restoreBtn').onclick = async () => {
 };
 
 // ---------- 組合區 ----------
-// comp 每項 = { id, ssh }。ssh=true 時該積木內容改為
-// 「透過 xargs -P 對 SSH 機器清單上所有機器並行執行」。
-function addToComp(id) { comp.push({ id, ssh: false }); renderAll(); }
+// comp 每項 = 單元:
+//   { kind:'block', id, ssh }              單一積木(可各自勾 SSH)
+//   { kind:'group', name, ssh, ids:[...] } 群組:整組勾一次 SSH,SSH 時
+//                                          對每台機器只開一條 ssh、遠端依序跑組內積木
+function addToComp(id) { comp.push({ kind:'block', id, ssh:false }); renderAll(); }
+
+function moveUnit(i, d) {
+  const j = i + d;
+  if (j < 0 || j >= comp.length) return;
+  [comp[i], comp[j]] = [comp[j], comp[i]]; renderAll();
+}
+
+$('newGroupBtn').onclick = () => {
+  const n = (prompt('群組名稱(英文/數字/底線,會變成 bash 函式名):', 'group1') || '').trim();
+  if (!n) return;
+  comp.push({ kind:'group', name:n, ssh:false, ids:[] });
+  renderAll();
+};
+
+function renderBlockUnit(c, i) {
+  const f = functions.find(x => x.id === c.id);
+  const div = document.createElement('div');
+  div.className = 'comp-item';
+  div.innerHTML = `
+    <span class="ord">${i + 1}.</span><span class="name">${esc(f ? f.name : '??')}</span>
+    <label style="font-size:11.5px; color:#1d4ed8; white-space:nowrap;" title="勾選後,此積木內容會透過 xargs 並行 SSH 到機器清單每一台執行">
+      <input type="checkbox" class="ssh-cb" ${c.ssh ? 'checked' : ''}> 🖧 SSH清單</label>
+    <button class="ghost mini" ${i === 0 ? 'disabled' : ''}>↑</button>
+    <button class="ghost mini" ${i === comp.length - 1 ? 'disabled' : ''}>↓</button>
+    <button class="danger mini">✕</button>`;
+  div.querySelector('.ssh-cb').onchange = (e) => { c.ssh = e.target.checked; renderAll(); };
+  const [up, down, del] = div.querySelectorAll('button:not(.ssh-cb)');
+  up.onclick = () => moveUnit(i, -1);
+  down.onclick = () => moveUnit(i, 1);
+  del.onclick = () => { comp.splice(i, 1); renderAll(); };
+  return div;
+}
+
+function renderGroupUnit(c, i) {
+  const div = document.createElement('div');
+  div.className = 'comp-group';
+  // 標題列
+  const gh = document.createElement('div');
+  gh.className = 'gh';
+  gh.innerHTML = `
+    <span class="ord">${i + 1}.</span><span class="gtag">📦 群組</span>
+    <input type="text" class="gname" value="${esc(c.name)}" title="群組名稱(bash 函式名)">
+    <label style="font-size:11.5px; color:#1d4ed8; white-space:nowrap;" title="勾選後,整組對每台機器只開一條 SSH、在遠端依序跑完組內所有積木">
+      <input type="checkbox" class="ssh-cb" ${c.ssh ? 'checked' : ''}> 🖧 整組 SSH清單</label>
+    <button class="ghost mini" ${i === 0 ? 'disabled' : ''}>↑</button>
+    <button class="ghost mini" ${i === comp.length - 1 ? 'disabled' : ''}>↓</button>
+    <button class="danger mini">✕ 群組</button>`;
+  gh.querySelector('.gname').onchange = (e) => { c.name = e.target.value.trim(); renderAll(); };
+  gh.querySelector('.ssh-cb').onchange = (e) => { c.ssh = e.target.checked; renderAll(); };
+  const [up, down, del] = gh.querySelectorAll('button:not(.ssh-cb)');
+  up.onclick = () => moveUnit(i, -1);
+  down.onclick = () => moveUnit(i, 1);
+  del.onclick = () => {
+    if (!c.ids.length || confirm(`刪除群組「${c.name}」?(組內積木一併移除)`))
+      { comp.splice(i, 1); renderAll(); }
+  };
+  div.appendChild(gh);
+  // 成員
+  const body = document.createElement('div');
+  body.className = 'gbody';
+  if (!c.ids.length) body.innerHTML = '<div class="hint">(空群組,從下方加入積木)</div>';
+  c.ids.forEach((mid, k) => {
+    const f = functions.find(x => x.id === mid);
+    const row = document.createElement('div');
+    row.className = 'gmember';
+    row.innerHTML = `
+      <span class="mname">${k + 1}) ${esc(f ? f.name : '??')}</span>
+      <button class="ghost mini" ${k === 0 ? 'disabled' : ''}>↑</button>
+      <button class="ghost mini" ${k === c.ids.length - 1 ? 'disabled' : ''}>↓</button>
+      <button class="danger mini">✕</button>`;
+    const [mu, md, mdel] = row.querySelectorAll('button');
+    mu.onclick = () => { [c.ids[k-1], c.ids[k]] = [c.ids[k], c.ids[k-1]]; renderAll(); };
+    md.onclick = () => { [c.ids[k+1], c.ids[k]] = [c.ids[k], c.ids[k+1]]; renderAll(); };
+    mdel.onclick = () => { c.ids.splice(k, 1); renderAll(); };
+    body.appendChild(row);
+  });
+  div.appendChild(body);
+  // 加入積木到此群組
+  const foot = document.createElement('div');
+  foot.className = 'gfoot';
+  const opts = functions.map(f => `<option value="${f.id}">${esc(f.name)}</option>`).join('');
+  foot.innerHTML = `<select>${opts}</select><button class="ghost mini">＋ 加入積木到群組</button>`;
+  const sel = foot.querySelector('select');
+  foot.querySelector('button').onclick = () => {
+    if (sel.value) { c.ids.push(sel.value); renderAll(); }
+  };
+  div.appendChild(foot);
+  return div;
+}
 
 function renderComp() {
   const box = $('compList');
   box.innerHTML = '';
   $('compEmpty').style.display = comp.length ? 'none' : '';
   comp.forEach((c, i) => {
-    const f = functions.find(x => x.id === c.id);
-    const div = document.createElement('div');
-    div.className = 'comp-item';
-    div.innerHTML = `
-      <span class="ord">${i + 1}.</span><span class="name">${esc(f.name)}</span>
-      <label style="font-size:11.5px; color:#1d4ed8; white-space:nowrap;" title="勾選後,此積木的內容會透過 xargs 並行 SSH 到機器清單上的每一台執行">
-        <input type="checkbox" class="ssh-cb" ${c.ssh ? 'checked' : ''}> 🖧 SSH清單</label>
-      <button class="ghost mini" ${i === 0 ? 'disabled' : ''}>↑</button>
-      <button class="ghost mini" ${i === comp.length - 1 ? 'disabled' : ''}>↓</button>
-      <button class="danger mini">✕</button>`;
-    div.querySelector('.ssh-cb').onchange = (e) => { c.ssh = e.target.checked; renderAll(); };
-    const [up, down, del] = div.querySelectorAll('button:not(.ssh-cb)');
-    up.onclick = () => { [comp[i-1], comp[i]] = [comp[i], comp[i-1]]; renderAll(); };
-    down.onclick = () => { [comp[i+1], comp[i]] = [comp[i], comp[i+1]]; renderAll(); };
-    del.onclick = () => { comp.splice(i, 1); renderAll(); };
-    box.appendChild(div);
+    box.appendChild(c.kind === 'group' ? renderGroupUnit(c, i) : renderBlockUnit(c, i));
   });
   $('sshBox').style.display = comp.some(c => c.ssh) ? '' : 'none';
 }
@@ -329,8 +421,12 @@ $('lintBtn').onclick = async () => {
 (async () => {
   try {
     comp = JSON.parse(localStorage.getItem('comp') || '[]');
-    // 相容舊格式(純 id 字串陣列)
-    comp = comp.map(c => typeof c === 'string' ? { id: c, ssh: false } : c);
+    // 相容舊格式:純 id 字串、或無 kind 的 {id,ssh} → 一律視為 block 單元
+    comp = comp.map(c => {
+      if (typeof c === 'string') return { kind:'block', id:c, ssh:false };
+      if (!c.kind) return { kind:'block', id:c.id, ssh:!!c.ssh };
+      return c;
+    });
   } catch { comp = []; }
   $('delBtn').style.display = 'none';
   await loadFunctions();

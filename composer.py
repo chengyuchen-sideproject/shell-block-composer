@@ -36,100 +36,174 @@ def _indent(body: str) -> str:
     return "\n".join(("    " + ln) if ln.strip() else "" for ln in lines)
 
 
-def _fanout_lines(f: dict, host_list: str, parallel: int) -> list[str]:
-    """SSH 機器清單並行版:積木內容包成 <name>__task(),
-    <name>() 用 xargs -P 對清單每台機器 ssh 執行 payload、逐台收斂結果。
-
-    - declare -f 把 payload 原樣送到遠端 bash -s 執行,不必先佈腳本到各機
-    - 每台輸出組成一塊、單次 printf,避免上千台同時列印交錯
-    - 結果 tee 到暫存檔即時顯示,結束後統計 [FAIL] 數決定結束碼
-    """
-    name = f["name"]
+def _hostfile_helper(host_list: str) -> list[str]:
+    """共用:解析機器清單路徑。相對路徑以「腳本所在目錄」為基準
+    (放在 .sh 同資料夾即可),絕對路徑或 HOST_LIST 覆寫則照用。"""
     return [
-        f"{name}__task() {{  # 會在清單中每台機器上執行的內容",
-        _indent(f["content"]),
+        "# 機器清單路徑解析:相對路徑以本腳本所在目錄為基準",
+        "__sbc_hostfile() {",
+        f'    local hf="${{HOST_LIST:-{host_list}}}"',
+        '    if [[ "$hf" != /* ]]; then',
+        '        local d; d="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"',
+        '        hf="$d/$hf"',
+        "    fi",
+        "    printf '%s' \"$hf\"",
         "}",
-        f"{name}() {{",
-        f'    local hostfile="${{HOST_LIST:-{host_list}}}"',
-        f'    local par="${{SSH_PARALLEL:-{parallel}}}"',
+        "",
+    ]
+
+
+def _fanout_runner(runner: str, label: str, member_names: list[str],
+                   parallel: int) -> list[str]:
+    """產生一個 fan-out 執行函式:把 member_names 這些 function 用 declare -f
+    送到清單每台機器,在遠端依序執行(rc 任一失敗即為失敗),xargs -P 控併發。
+
+    - 單一積木:member_names 只有一個
+    - 群組:member_names 為組內多個積木,遠端同一條 ssh 內依序跑完
+    """
+    declare_names = " ".join(member_names)
+    calls = ("rc=0; " + "; ".join(f"{n} || rc=1" for n in member_names)
+             + "; exit \\$rc")
+    return [
+        f"{runner}() {{",
+        "    local hostfile par total tmp fails",
+        '    hostfile="$(__sbc_hostfile)"',
+        f'    par="${{SSH_PARALLEL:-{parallel}}}"',
         '    if [ ! -r "$hostfile" ]; then',
         '        echo "[錯誤] 讀不到機器清單 $hostfile(一行一台,可 user@host;'
-        'HOST_LIST=路徑 可覆寫)" >&2',
+        '放腳本同目錄或用 HOST_LIST=路徑 覆寫)" >&2',
         "        return 1",
         "    fi",
-        "    local total tmp fails",
         "    total=$(grep -cEv '^[[:space:]]*(#|$)' \"$hostfile\")",
-        f'    echo "=== {name}:對 $total 台機器並行執行(同時上限 $par)==="',
-        f'    export _FANOUT_CMD="$(declare -f {name}__task); {name}__task"',
+        f'    echo "=== {label}:對 $total 台機器並行執行(同時上限 $par)==="',
+        f'    export _SBC_FANOUT="$(declare -f {declare_names}); {calls}"',
         "    tmp=$(mktemp)",
         "    grep -Ev '^[[:space:]]*(#|$)' \"$hostfile\" \\",
         '        | xargs -r -P "$par" -n 1 -- bash -c \'',
         "            h=$1",
         '            out=$(ssh -o BatchMode=yes -o ConnectTimeout=5 "$h" bash -s \\',
-        '                  <<<"$_FANOUT_CMD" 2>&1); rc=$?',
+        '                  <<<"$_SBC_FANOUT" 2>&1); rc=$?',
         '            if [ "$rc" -eq 0 ]; then tag="[OK]"; else tag="[FAIL rc=$rc]"; fi',
         '            printf "%s\\n" "───── $h $tag ─────',
         '$out"',
         "        ' _ | tee \"$tmp\"",
         '    fails=$(grep -c "^───── .* \\[FAIL" "$tmp"); rm -f "$tmp"',
-        '    echo "[小結] '
-        f'{name}: $((total - fails))/$total 成功, $fails 失敗"',
+        f'    echo "[小結] {label}: $((total - fails))/$total 成功, $fails 失敗"',
         '    [ "$fails" -eq 0 ]',
         "}",
     ]
 
 
-def generate_script(funcs: list[dict], script_name: str = "composed",
+def _local_group(gname: str, member_names: list[str]) -> list[str]:
+    """本機群組:組內積木在同一個 shell 依序執行(可共享 export 的變數),
+    任一失敗整組視為失敗但仍跑完其餘。"""
+    lines = [
+        f"{gname}() {{",
+        "    local __grc=0",
+        f'    echo "=== 群組 {gname}:依序執行 {len(member_names)} 個積木 ==="',
+    ]
+    for n in member_names:
+        lines.append(f"    {n} || __grc=1")
+    lines += ["    return $__grc", "}"]
+    return lines
+
+
+def _normalize_units(items: list[dict]) -> list[dict]:
+    """把輸入正規化成 units。相容舊格式(純 func dict,帶 ssh_fanout)。"""
+    units = []
+    for it in items:
+        if it.get("kind") in ("block", "group"):
+            units.append(it)
+        else:  # 舊格式:一個 func dict = 一個 block unit
+            units.append({"kind": "block", "func": it,
+                          "ssh": bool(it.get("ssh_fanout"))})
+    return units
+
+
+def generate_script(items: list[dict], script_name: str = "composed",
                     mode: str = "sequential", host_list: str = "hosts.txt",
                     ssh_parallel: int = 50) -> tuple[str, list[str]]:
     """組出完整腳本。回傳(腳本文字, 警告清單)。
 
-    funcs 每項可帶 "ssh_fanout": True → 該積木改為「SSH 機器清單並行版」:
-    內容在清單中每台機器上執行(xargs -P 控併發),而非本機執行。
-    host_list / ssh_parallel 是寫進腳本的預設值,執行時可用
-    HOST_LIST / SSH_PARALLEL 環境變數覆寫。
+    items 每項為一個「單元」:
+      block:{"kind":"block","func":{name,description,content},"ssh":bool}
+      group:{"kind":"group","name","ssh":bool,
+             "members":[{name,description,content}...]}
+    也相容舊格式(純 func dict,帶 ssh_fanout)。
+    ssh=True 的單元(積木或群組)改用 SSH fan-out:內容送到機器清單每台執行;
+    群組 SSH 時整組在遠端同一條 ssh 內依序跑完。
+    host_list / ssh_parallel 是寫進腳本的預設值,可用 HOST_LIST / SSH_PARALLEL 覆寫。
 
-    mode:
-      sequential    依序執行,失敗不中斷,最後回報失敗清單(預設)
-      stop_on_error 依序執行,任一積木失敗即中止
-      parallel      並行執行:每塊丟背景(&)同時跑,輸出各自導暫存檔避免交錯,
-                    再依啟動順序 wait 收斂、逐塊印出與收集結束碼。
-                    注意:並行是子 shell,積木間不能共享變數、不保證先後。
+    mode:sequential(失敗不中斷)/ stop_on_error(失敗即中止)/ parallel(單元間並行)。
     """
+    units = _normalize_units(items)
     warnings: list[str] = []
-    seen: set[str] = set()
-    for f in funcs:
-        if f["name"] in seen:
-            warnings.append(f"函式「{f['name']}」重複加入,後者定義會覆蓋前者")
-        seen.add(f["name"])
-    if mode == "parallel" and sum(1 for f in funcs if f.get("ssh_fanout")) > 1:
+
+    # 蒐集所有要定義的積木(標準積木 + 群組成員),依名稱去重(名稱在庫中唯一)
+    block_defs: dict[str, dict] = {}
+    invoke_count: dict[str, int] = {}
+    for u in units:
+        members = ([u["func"]] if u["kind"] == "block" else u["members"])
+        for f in members:
+            block_defs.setdefault(f["name"], f)
+            invoke_count[f["name"]] = invoke_count.get(f["name"], 0) + 1
+    for name, c in invoke_count.items():
+        if c > 1:
+            warnings.append(f"積木「{name}」被多個單元使用,執行時會各跑一次")
+
+    any_ssh = any(u["ssh"] for u in units)
+    ssh_unit_count = sum(1 for u in units if u["ssh"])
+    if mode == "parallel" and ssh_unit_count > 1:
         warnings.append(
-            "多個 SSH 並行積木又選整體並行模式:同時連線數最高可達"
-            "「積木數×SSH_PARALLEL」,請留意本機與網路負載")
+            "多個 SSH 單元又選整體並行:同時連線數最高可達"
+            "「SSH 單元數×SSH_PARALLEL」,請留意本機與網路負載")
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     out = [
         "#!/usr/bin/env bash",
         f"# {script_name}.sh — 由 Shell Script 功能積木組合器產生({now})",
-        ("# 各功能為獨立 function,可單獨取用;整支執行則「並行」全跑。"
-         if mode == "parallel" else
-         "# 各功能為獨立 function,可單獨取用;整支執行則依序全跑。"),
+        "# 各功能為獨立 function,可單獨取用。",
         "set -u",
         "",
     ]
-    for f in funcs:
+    if any_ssh:
+        out.extend(_hostfile_helper(host_list))
+
+    # 1) 所有積木函式定義(每個唯一名稱定義一次)
+    for name, f in block_defs.items():
         desc = (f.get("description") or "").replace("\n", " ")
-        if f.get("ssh_fanout"):
-            out.append(f"# ── {f['name']}(SSH 機器清單並行):{desc}")
-            out.extend(_fanout_lines(f, host_list, ssh_parallel))
-        else:
-            out.append(f"# ── {f['name']}:{desc}")
-            out.append(f"{f['name']}() {{")
-            out.append(_indent(f["content"]))
-            out.append("}")
+        out.append(f"# ── {name}:{desc}")
+        out.append(f"{name}() {{")
+        out.append(_indent(f["content"]))
+        out.append("}")
         out.append("")
 
-    report = [  # 結尾共用:回報失敗清單(sequential / parallel 共用)
+    # 2) 各單元的執行函式(fan-out runner / 本機群組),並記錄 main 要呼叫的 (call,label)
+    calls: list[tuple[str, str]] = []
+    for i, u in enumerate(units):
+        if u["kind"] == "block":
+            name = u["func"]["name"]
+            if u["ssh"]:
+                runner = f"__sbc_unit_{i}"
+                out.append(f"# ── {name}(SSH 機器清單並行)")
+                out.extend(_fanout_runner(runner, name, [name], ssh_parallel))
+                out.append("")
+                calls.append((runner, name))
+            else:
+                calls.append((name, name))  # 直接呼叫已定義的積木
+        else:  # group
+            gname = u["name"]
+            member_names = [m["name"] for m in u["members"]]
+            if u["ssh"]:
+                out.append(f"# ══ 群組 {gname}(SSH 機器清單並行,遠端依序跑組內積木)")
+                out.extend(_fanout_runner(gname, gname, member_names, ssh_parallel))
+            else:
+                out.append(f"# ══ 群組 {gname}(本機依序執行組內積木)")
+                out.extend(_local_group(gname, member_names))
+            out.append("")
+            calls.append((gname, gname))
+
+    report = [
         '    echo ""',
         '    if [ "${#failed[@]}" -gt 0 ]; then',
         '        echo "[結果] 失敗項目: ${failed[*]}" >&2',
@@ -140,19 +214,19 @@ def generate_script(funcs: list[dict], script_name: str = "composed",
 
     out.append('main() {')
     if mode == "stop_on_error":
-        for f in funcs:
-            out.append(f"    {f['name']} || {{ echo \"[中止] {f['name']} 失敗\" >&2; return 1; }}")
+        for call, label in calls:
+            out.append(f"    {call} || {{ echo \"[中止] {label} 失敗\" >&2; return 1; }}")
     elif mode == "parallel":
         out.append("    local tmpdir")
         out.append('    tmpdir=$(mktemp -d) || { echo "[錯誤] 無法建立暫存目錄" >&2; return 1; }')
         out.append("    local pids=() names=()")
         out.append("")
-        out.append("    # 每塊丟背景同時跑;輸出導到各自的暫存檔,避免交錯")
-        for i, f in enumerate(funcs):
-            out.append(f'    {f["name"]} > "$tmpdir/{i:02d}.log" 2>&1 &')
-            out.append(f'    pids+=($!); names+=("{f["name"]}")')
+        out.append("    # 每個單元丟背景同時跑;輸出導到各自的暫存檔,避免交錯")
+        for i, (call, label) in enumerate(calls):
+            out.append(f'    {call} > "$tmpdir/{i:02d}.log" 2>&1 &')
+            out.append(f'    pids+=($!); names+=("{label}")')
         out.append("")
-        out.append("    # 依啟動順序等待,逐塊取回結束碼並印出輸出")
+        out.append("    # 依啟動順序等待,逐一取回結束碼並印出輸出")
         out.append("    local failed=() i rc")
         out.append('    for i in "${!pids[@]}"; do')
         out.append('        rc=0; wait "${pids[$i]}" || rc=$?')
@@ -164,8 +238,8 @@ def generate_script(funcs: list[dict], script_name: str = "composed",
         out.extend(report)
     else:
         out.append("    local failed=()")
-        for f in funcs:
-            out.append(f"    {f['name']} || failed+=(\"{f['name']}\")")
+        for call, label in calls:
+            out.append(f"    {call} || failed+=(\"{label}\")")
         out.extend(report)
     out.append("}")
     out.append("")

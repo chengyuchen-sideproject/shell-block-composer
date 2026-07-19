@@ -142,15 +142,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def _compose(self):
         d = self._body()
-        # 新格式 items=[{id, ssh}];舊格式 ids=[...] 向後相容
-        items = d.get("items")
-        if items is None:
-            items = [{"id": i} for i in (d.get("ids") or [])]
-        if not items:
+        # 單元格式 items=[{kind:'block',id,ssh} | {kind:'group',name,ssh,ids:[]}]
+        # 舊格式 items=[{id,ssh}] / ids=[...] 皆相容
+        raw_items = d.get("items")
+        if raw_items is None:
+            raw_items = [{"id": i} for i in (d.get("ids") or [])]
+        if not raw_items:
             return self._err("尚未加入任何積木")
         by_id = {f["id"]: f for f in storage.load_functions()}
-        if any(it.get("id") not in by_id for it in items):
-            return self._err("有積木已被刪除,請從組合區移除後重試")
+
         name = (d.get("script_name") or "composed").strip() or "composed"
         if not _SAFE_FILENAME.match(name):
             return self._err("腳本檔名只能用英文、數字、底線、減號(1-64字)")
@@ -168,10 +168,38 @@ class Handler(BaseHTTPRequestHandler):
             return self._err("並行數必須是整數")
         if not (1 <= ssh_parallel <= 2000):
             return self._err("並行數需在 1~2000 之間")
-        funcs = [{**by_id[it["id"]], "ssh_fanout": bool(it.get("ssh"))}
-                 for it in items]
+
+        # 建立單元;群組名稱不可與積木名或其他群組名衝突(都會變成 bash 函式名)
+        block_names = {f["name"] for f in by_id.values()}
+        group_names: set[str] = set()
+        units = []
+        for it in raw_items:
+            if it.get("kind") == "group":
+                gname = (it.get("name") or "").strip()
+                gerr = composer.validate_name(gname)
+                if gerr:
+                    return self._err(f"群組名稱不合法:{gerr}")
+                if gname in block_names:
+                    return self._err(f"群組名稱「{gname}」與某積木同名,請改名")
+                if gname in group_names:
+                    return self._err(f"群組名稱「{gname}」重複")
+                group_names.add(gname)
+                mids = it.get("ids") or []
+                if not mids:
+                    return self._err(f"群組「{gname}」是空的,請加入積木或刪除")
+                if any(m not in by_id for m in mids):
+                    return self._err("群組內有積木已被刪除,請移除後重試")
+                units.append({"kind": "group", "name": gname,
+                              "ssh": bool(it.get("ssh")),
+                              "members": [by_id[m] for m in mids]})
+            else:  # block
+                if it.get("id") not in by_id:
+                    return self._err("有積木已被刪除,請從組合區移除後重試")
+                units.append({"kind": "block", "func": by_id[it["id"]],
+                              "ssh": bool(it.get("ssh"))})
+
         script, warnings = composer.generate_script(
-            funcs, name, mode=mode,
+            units, name, mode=mode,
             host_list=host_list, ssh_parallel=ssh_parallel)
         resp = {"script": script, "warnings": warnings}
         if d.get("save"):
